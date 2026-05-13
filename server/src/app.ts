@@ -1,59 +1,55 @@
-import { useState, useMemo } from "react";
+/**
+ * app.ts — Express server setup
+ * Configures middleware, routes, and error handling
+ */
 
-const GHS = (amount: number) =>
-  "GHS " + amount.toLocaleString("en-GH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+import express from "express";
+import cors from "cors";
+import logger from "./utils/logger";
 
-const VAT_RATE = 0.15;
-const NHIL_RATE = 0.025;
-const GETFUND_RATE = 0.025;
-const WHT_RATE = 0.05;
+// Import routes
+import healthRouter from "./routes/health";
+import authRouter from "./routes/auth";
+import invoicesRouter from "./routes/invoices";
 
-type InvoiceStatus = "Draft" | "Sent" | "Partial" | "Paid" | "Overdue";
+const app = express();
 
-interface Invoice {
-  id: string;
-  client: string;
-  project: string;
-  issueDate: string;
-  dueDate: string;
-  subtotal: number;
-  applyVAT: boolean;
-  applyWHT: boolean;
-  status: InvoiceStatus;
-  paidAmount: number;
-  description: string;
-}
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const seedInvoices: Invoice[] = [
-  { id: "INV-2024-001", client: "Ghana Highways Authority", project: "Accra Ring Road Extension", issueDate: "2024-01-05", dueDate: "2024-02-05", subtotal: 480000, applyVAT: true, applyWHT: false, status: "Paid", paidAmount: 576000, description: "Phase 1 – Site preparation & foundation works" },
-  { id: "INV-2024-002", client: "Regimanuel Gray Ltd", project: "East Legon Residential Complex", issueDate: "2024-01-18", dueDate: "2024-02-18", subtotal: 320000, applyVAT: true, applyWHT: true, status: "Overdue", paidAmount: 0, description: "Structural frame – Blocks A & B" },
-  { id: "INV-2024-003", client: "Stanbic Bank Ghana", project: "Stanbic HQ Renovation", issueDate: "2024-02-01", dueDate: "2024-03-01", subtotal: 195000, applyVAT: true, applyWHT: false, status: "Partial", paidAmount: 100000, description: "Interior fit-out – Floors 1–3" },
-  { id: "INV-2024-004", client: "Accra Metropolitan Assembly", project: "Tema Community Centre", issueDate: "2024-02-14", dueDate: "2024-03-14", subtotal: 670000, applyVAT: true, applyWHT: false, status: "Sent", paidAmount: 0, description: "Full construction – Phase 2 milestone" },
-  { id: "INV-2024-005", client: "Total Energies Ghana", project: "Takoradi Fuel Terminal", issueDate: "2024-03-01", dueDate: "2024-04-01", subtotal: 850000, applyVAT: true, applyWHT: true, status: "Draft", paidAmount: 0, description: "Civil & mechanical works – Tank farm area" },
-  { id: "INV-2024-006", client: "Maersk Ghana", project: "Tema Port Warehouse", issueDate: "2024-03-10", dueDate: "2024-04-10", subtotal: 290000, applyVAT: true, applyWHT: false, status: "Sent", paidAmount: 0, description: "Steel roofing & cladding installation" },
-];
+// Request logging
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.path}`);
+  next();
+});
 
-function calcTax(inv: Invoice) {
-  const vat = inv.applyVAT ? inv.subtotal * VAT_RATE : 0;
-  const nhil = inv.applyVAT ? inv.subtotal * NHIL_RATE : 0;
-  const getfund = inv.applyVAT ? inv.subtotal * GETFUND_RATE : 0;
-  const gross = inv.subtotal + vat + nhil + getfund;
-  const wht = inv.applyWHT ? gross * WHT_RATE : 0;
-  const total = gross - wht;
-  return { vat, nhil, getfund, gross, wht, total };
-}
+// Routes
+app.use("/health", healthRouter);
+app.use("/api/v1/auth", authRouter);
+app.use("/api/v1/invoices", invoicesRouter);
 
-const STATUS_STYLE: Record<InvoiceStatus, { bg: string; color: string; dot: string }> = {
-  Draft:   { bg: "#F1EFE8", color: "#5F5E5A", dot: "#888780" },
-  Sent:    { bg: "#E6F1FB", color: "#185FA5", dot: "#378ADD" },
-  Partial: { bg: "#FAEEDA", color: "#854F0B", dot: "#EF9F27" },
-  Paid:    { bg: "#EAF3DE", color: "#3B6D11", dot: "#639922" },
-  Overdue: { bg: "#FCEBEB", color: "#A32D2D", dot: "#E24B4A" },
-};
+// Health check at root
+app.get("/", (req, res) => {
+  res.json({ message: "BuildRight API - Under Construction" });
+});
 
-const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
 
-export default function App() {
+// Error handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error("Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error" });
+});
+
+export default app;
+
+// The code below is React client code - to be removed
+// export default function App() {
   const [tab, setTab] = useState<"invoices" | "cashflow">("invoices");
   const [invoices, setInvoices] = useState<Invoice[]>(seedInvoices);
   const [showForm, setShowForm] = useState(false);
