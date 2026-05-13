@@ -47,10 +47,6 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 export default app;
-
-// The code below is React client code - to be removed
-// export default function App() {
-  const [tab, setTab] = useState<"invoices" | "cashflow">("invoices");
   const [invoices, setInvoices] = useState<Invoice[]>(seedInvoices);
   const [showForm, setShowForm] = useState(false);
   const [selectedInv, setSelectedInv] = useState<Invoice | null>(null);
