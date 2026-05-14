@@ -1,32 +1,27 @@
 /**
- * auth.ts — JWT authentication & role-based access middleware
- *
- * Usage:
- *   router.get("/invoices", authenticate, authorize("accountant", "ceo"), handler)
- *
- * Implemented fully in Phase 1.
+ * auth.ts — Bearer (Supabase access token) authentication & role checks
  */
 
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
+import { getSupabaseClient } from "../config/supabaseClient";
 
 export type UserRole = "ceo" | "accountant" | "employee" | "admin";
 
 export interface AuthenticatedRequest extends Request {
+  token?: string;
   user?: {
     id: string;
     email: string;
     role: UserRole;
-    firmId: string;
+    firm_id: string;
   };
 }
 
-/** Verify JWT and attach user to request */
-export function authenticate(
+export async function requireAuth(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -34,19 +29,48 @@ export function authenticate(
     return;
   }
 
-  const token = authHeader.slice(7);
+  const token = authHeader.slice("Bearer ".length).trim();
+  if (!token) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+
+  req.token = token;
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthenticatedRequest["user"];
-    req.user = payload;
+    const supabase = getSupabaseClient(token);
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+
+    if (authError || !authData.user) {
+      res.status(401).json({ error: "Invalid or expired token" });
+      return;
+    }
+
+    const { data: row, error: userError } = await supabase
+      .from("users")
+      .select("id, email, role, firm_id")
+      .eq("id", authData.user.id)
+      .single();
+
+    if (userError || !row) {
+      res.status(401).json({ error: "User not found" });
+      return;
+    }
+
+    req.user = {
+      id: row.id,
+      email: row.email,
+      role: row.role as UserRole,
+      firm_id: row.firm_id,
+    };
+
     next();
-  } catch {
-    res.status(401).json({ error: "Invalid or expired token" });
+  } catch (err) {
+    next(err);
   }
 }
 
-/** Check that the authenticated user has one of the required roles */
-export function authorize(...roles: UserRole[]) {
+export function requireRole(roles: UserRole[]) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     if (!req.user || !roles.includes(req.user.role)) {
       res.status(403).json({ error: "Insufficient permissions" });

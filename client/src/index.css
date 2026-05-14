@@ -66,10 +66,10 @@ html, body, #root {
 }
 
 body {
-  font-family: var(--font-sans);
+  font-family: "Inter", var(--font-sans);
   font-size: 14px;
   color: var(--color-text-primary);
-  background: var(--color-background-tertiary);
+  background: #ffffff;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }

@@ -1,277 +1,355 @@
-import { Router, Response } from "express";
-import { authenticate, authorize, AuthenticatedRequest } from "../middleware/auth";
-import { query } from "../config/database";
+import { Router, Response, NextFunction } from "express";
+import { getSupabaseClient } from "../config/supabaseClient";
 import { computeInvoiceTax } from "../lib/taxComputation";
+import {
+  requireAuth,
+  requireRole,
+  AuthenticatedRequest,
+} from "../middleware/auth";
 
 const router = Router();
 
-/**
- * GET /api/v1/invoices
- * List all invoices for the authenticated user's firm
- */
-router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
+const INVOICE_STATUSES = [
+  "Draft",
+  "Sent",
+  "Partial",
+  "Paid",
+  "Overdue",
+] as const;
+
+type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
+
+function isInvoiceStatus(s: string): s is InvoiceStatus {
+  return (INVOICE_STATUSES as readonly string[]).includes(s);
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+router.get(
+  "/",
+  requireAuth,
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const supabase = getSupabaseClient(req.token!);
+      const firmId = req.user!.firm_id;
+      const statusParam =
+        typeof req.query.status === "string" ? req.query.status : undefined;
+
+      if (statusParam !== undefined && !isInvoiceStatus(statusParam)) {
+        res.status(400).json({ error: "Invalid status query parameter" });
+        return;
+      }
+
+      let q = supabase
+        .from("invoices")
+        .select("*, invoice_tax_breakdowns (*)")
+        .eq("firm_id", firmId)
+        .is("deleted_at", null);
+
+      if (statusParam) {
+        q = q.eq("status", statusParam);
+      }
+
+      const { data, error } = await q.order("created_at", { ascending: false });
+
+      if (error) {
+        res.status(500).json({ message: error.message });
+        return;
+      }
+
+      res.status(200).json(data ?? []);
+    } catch (err) {
+      next(err);
     }
-
-    const invoices = await query<{
-      id: string;
-      firm_id: string;
-      client: string;
-      project: string;
-      description: string;
-      issue_date: string;
-      due_date: string;
-      subtotal: number;
-      apply_vat: boolean;
-      apply_wht: boolean;
-      status: string;
-      paid_amount: number;
-    }>(
-      `SELECT id, firm_id, client, project, description, issue_date, due_date, 
-              subtotal, apply_vat, apply_wht, status, paid_amount 
-       FROM invoices WHERE firm_id = $1 ORDER BY issue_date DESC`,
-      [req.user.firmId]
-    );
-
-    res.json(
-      invoices.map(inv => ({
-        id: inv.id,
-        client: inv.client,
-        project: inv.project,
-        description: inv.description,
-        issueDate: inv.issue_date,
-        dueDate: inv.due_date,
-        subtotal: inv.subtotal,
-        applyVAT: inv.apply_vat,
-        applyWHT: inv.apply_wht,
-        status: inv.status,
-        paidAmount: inv.paid_amount,
-      }))
-    );
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch invoices" });
   }
-});
+);
 
-/**
- * POST /api/v1/invoices
- * Create a new invoice (accountant or ceo only)
- */
-router.post("/", authenticate, authorize("accountant", "ceo"), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
+router.post(
+  "/",
+  requireAuth,
+  requireRole(["accountant"]),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const body = req.body ?? {};
+      const {
+        client_id,
+        project_id,
+        invoice_number,
+        issue_date,
+        due_date,
+        subtotal: subtotalRaw,
+      } = body;
+
+      if (
+        client_id == null ||
+        client_id === "" ||
+        project_id == null ||
+        project_id === "" ||
+        invoice_number == null ||
+        invoice_number === "" ||
+        issue_date == null ||
+        issue_date === "" ||
+        due_date == null ||
+        due_date === "" ||
+        subtotalRaw == null ||
+        subtotalRaw === ""
+      ) {
+        res
+          .status(400)
+          .json({
+            error:
+              "client_id, project_id, invoice_number, issue_date, due_date, and subtotal are required",
+          });
+        return;
+      }
+
+      const subtotal = Number(subtotalRaw);
+      if (Number.isNaN(subtotal)) {
+        res.status(400).json({ error: "subtotal must be a number" });
+        return;
+      }
+
+      const applyVat =
+        body.apply_vat !== undefined ? Boolean(body.apply_vat) : true;
+      const applyWht =
+        body.apply_wht !== undefined ? Boolean(body.apply_wht) : false;
+
+      const tax = computeInvoiceTax(subtotal, applyVat, applyWht);
+      const supabase = getSupabaseClient(req.token!);
+      const user = req.user!;
+
+      const insertRow = {
+        firm_id: user.firm_id,
+        project_id,
+        client_id,
+        invoice_number: String(invoice_number),
+        issue_date,
+        due_date,
+        subtotal: tax.subtotal,
+        apply_vat: applyVat,
+        apply_wht: applyWht,
+        status: "Draft" as const,
+        paid_amount: 0,
+        created_by: user.id,
+      };
+
+      const { data: invoice, error: invError } = await supabase
+        .from("invoices")
+        .insert(insertRow)
+        .select("id")
+        .single();
+
+      if (invError || !invoice) {
+        res.status(500).json({ message: invError?.message ?? "Insert failed" });
+        return;
+      }
+
+      const breakdownRow = {
+        invoice_id: invoice.id,
+        subtotal: tax.subtotal,
+        vat_amount: tax.vatAmount,
+        nhil_amount: tax.nhilAmount,
+        getfund_amount: tax.getfundAmount,
+        gross_total: tax.grossTotal,
+        wht_amount: tax.whtAmount,
+        net_payable: tax.netPayable,
+      };
+
+      const { error: taxError } = await supabase
+        .from("invoice_tax_breakdowns")
+        .insert(breakdownRow);
+
+      if (taxError) {
+        await supabase.from("invoices").delete().eq("id", invoice.id);
+        res.status(500).json({ message: taxError.message });
+        return;
+      }
+
+      const { data: full, error: fetchError } = await supabase
+        .from("invoices")
+        .select("*, invoice_tax_breakdowns (*)")
+        .eq("id", invoice.id)
+        .single();
+
+      if (fetchError || !full) {
+        res
+          .status(500)
+          .json({ message: fetchError?.message ?? "Failed to load invoice" });
+        return;
+      }
+
+      res.status(201).json(full);
+    } catch (err) {
+      next(err);
     }
-
-    const { client, project, description, issueDate, dueDate, subtotal, applyVAT, applyWHT } = req.body;
-
-    if (!client || !project || subtotal === undefined || issueDate === undefined) {
-      res.status(400).json({ error: "Missing required fields" });
-      return;
-    }
-
-    // Compute taxes
-    const tax = computeInvoiceTax(subtotal, applyVAT ?? true, applyWHT ?? false);
-
-    // Generate invoice ID
-    const timestamp = Date.now().toString(36).toUpperCase();
-    const invoiceId = `INV-${timestamp}`;
-
-    const result = await query<{ id: string }>(
-      `INSERT INTO invoices 
-       (id, firm_id, client, project, description, issue_date, due_date, subtotal, 
-        apply_vat, apply_wht, status, paid_amount, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
-       RETURNING id`,
-      [invoiceId, req.user.firmId, client, project, description, issueDate, dueDate || issueDate, 
-       subtotal, applyVAT ?? true, applyWHT ?? false, "Draft", 0]
-    );
-
-    res.status(201).json({
-      id: result[0].id,
-      client,
-      project,
-      description,
-      issueDate,
-      dueDate: dueDate || issueDate,
-      subtotal,
-      applyVAT: applyVAT ?? true,
-      applyWHT: applyWHT ?? false,
-      status: "Draft",
-      paidAmount: 0,
-      tax,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to create invoice" });
   }
-});
+);
 
-/**
- * GET /api/v1/invoices/:id
- * Get a specific invoice
- */
-router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
+router.patch(
+  "/:id/status",
+  requireAuth,
+  requireRole(["accountant"]),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const { id } = req.params;
+      const status = req.body?.status;
+
+      if (status == null || status === "" || !isInvoiceStatus(String(status))) {
+        res.status(400).json({ error: "Invalid or missing status" });
+        return;
+      }
+
+      const supabase = getSupabaseClient(req.token!);
+      const firmId = req.user!.firm_id;
+
+      const { data, error } = await supabase
+        .from("invoices")
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("firm_id", firmId)
+        .is("deleted_at", null)
+        .select()
+        .maybeSingle();
+
+      if (error) {
+        res.status(500).json({ message: error.message });
+        return;
+      }
+
+      if (!data) {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+
+      res.status(200).json(data);
+    } catch (err) {
+      next(err);
     }
-
-    const invoices = await query<{
-      id: string;
-      client: string;
-      project: string;
-      description: string;
-      issue_date: string;
-      due_date: string;
-      subtotal: number;
-      apply_vat: boolean;
-      apply_wht: boolean;
-      status: string;
-      paid_amount: number;
-    }>(
-      `SELECT id, client, project, description, issue_date, due_date, 
-              subtotal, apply_vat, apply_wht, status, paid_amount 
-       FROM invoices WHERE id = $1 AND firm_id = $2`,
-      [req.params.id, req.user.firmId]
-    );
-
-    if (invoices.length === 0) {
-      res.status(404).json({ error: "Invoice not found" });
-      return;
-    }
-
-    const inv = invoices[0];
-    const tax = computeInvoiceTax(inv.subtotal, inv.apply_vat, inv.apply_wht);
-
-    res.json({
-      id: inv.id,
-      client: inv.client,
-      project: inv.project,
-      description: inv.description,
-      issueDate: inv.issue_date,
-      dueDate: inv.due_date,
-      subtotal: inv.subtotal,
-      applyVAT: inv.apply_vat,
-      applyWHT: inv.apply_wht,
-      status: inv.status,
-      paidAmount: inv.paid_amount,
-      tax,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch invoice" });
   }
-});
+);
 
-/**
- * PATCH /api/v1/invoices/:id
- * Update invoice status or payment info (accountant or ceo only)
- */
-router.patch("/:id", authenticate, authorize("accountant", "ceo"), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
+router.post(
+  "/:id/payments",
+  requireAuth,
+  requireRole(["accountant"]),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const { id } = req.params;
+      const paymentRaw = req.body?.payment_amount;
+
+      if (
+        paymentRaw == null ||
+        paymentRaw === "" ||
+        Number.isNaN(Number(paymentRaw))
+      ) {
+        res.status(400).json({ error: "payment_amount is required" });
+        return;
+      }
+
+      const paymentAmount = round2(Number(paymentRaw));
+      if (paymentAmount <= 0) {
+        res.status(400).json({ error: "payment_amount must be positive" });
+        return;
+      }
+
+      const supabase = getSupabaseClient(req.token!);
+      const firmId = req.user!.firm_id;
+
+      const { data: inv, error: fetchError } = await supabase
+        .from("invoices")
+        .select("paid_amount, net_payable, status")
+        .eq("id", id)
+        .eq("firm_id", firmId)
+        .is("deleted_at", null)
+        .maybeSingle();
+
+      if (fetchError) {
+        res.status(500).json({ message: fetchError.message });
+        return;
+      }
+
+      if (!inv) {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+
+      const netPayable = round2(Number(inv.net_payable));
+      const prevPaid = round2(Number(inv.paid_amount));
+      const newPaid = round2(prevPaid + paymentAmount);
+
+      let newStatus: InvoiceStatus;
+      if (newPaid >= netPayable) {
+        newStatus = "Paid";
+      } else {
+        newStatus = "Partial";
+      }
+
+      const paidToStore = newPaid >= netPayable ? netPayable : newPaid;
+
+      const { data: updated, error: updateError } = await supabase
+        .from("invoices")
+        .update({
+          paid_amount: paidToStore,
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id)
+        .eq("firm_id", firmId)
+        .is("deleted_at", null)
+        .select()
+        .maybeSingle();
+
+      if (updateError) {
+        res.status(500).json({ message: updateError.message });
+        return;
+      }
+
+      if (!updated) {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+
+      res.status(200).json(updated);
+    } catch (err) {
+      next(err);
     }
-
-    const { status, paidAmount } = req.body;
-
-    const invoices = await query<{ subtotal: number; apply_vat: boolean; apply_wht: boolean }>(
-      `SELECT subtotal, apply_vat, apply_wht FROM invoices 
-       WHERE id = $1 AND firm_id = $2`,
-      [req.params.id, req.user.firmId]
-    );
-
-    if (invoices.length === 0) {
-      res.status(404).json({ error: "Invoice not found" });
-      return;
-    }
-
-    const inv = invoices[0];
-    const updateFields = [];
-    const updateValues: any[] = [];
-    let paramCount = 1;
-
-    if (status !== undefined) {
-      updateFields.push(`status = $${paramCount++}`);
-      updateValues.push(status);
-    }
-
-    if (paidAmount !== undefined) {
-      updateFields.push(`paid_amount = $${paramCount++}`);
-      updateValues.push(paidAmount);
-    }
-
-    if (updateFields.length === 0) {
-      res.status(400).json({ error: "No fields to update" });
-      return;
-    }
-
-    updateFields.push(`updated_at = NOW()`);
-    updateValues.push(req.params.id, req.user.firmId);
-
-    const sql = `UPDATE invoices SET ${updateFields.join(", ")} 
-                 WHERE id = $${paramCount + 1} AND firm_id = $${paramCount + 2} 
-                 RETURNING *`;
-
-    const result = await query<any>(sql, updateValues);
-
-    if (result.length === 0) {
-      res.status(500).json({ error: "Failed to update invoice" });
-      return;
-    }
-
-    const updated = result[0];
-    const tax = computeInvoiceTax(inv.subtotal, inv.apply_vat, inv.apply_wht);
-
-    res.json({
-      id: updated.id,
-      client: updated.client,
-      project: updated.project,
-      description: updated.description,
-      issueDate: updated.issue_date,
-      dueDate: updated.due_date,
-      subtotal: updated.subtotal,
-      applyVAT: updated.apply_vat,
-      applyWHT: updated.apply_wht,
-      status: updated.status,
-      paidAmount: updated.paid_amount,
-      tax,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to update invoice" });
   }
-});
+);
 
-/**
- * DELETE /api/v1/invoices/:id
- * Delete an invoice (ceo only)
- */
-router.delete("/:id", authenticate, authorize("ceo"), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
+router.get(
+  "/:id",
+  requireAuth,
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const supabase = getSupabaseClient(req.token!);
+      const { id } = req.params;
+      const firmId = req.user!.firm_id;
+
+      const { data, error } = await supabase
+        .from("invoices")
+        .select("*, invoice_tax_breakdowns (*)")
+        .eq("id", id)
+        .eq("firm_id", firmId)
+        .is("deleted_at", null)
+        .maybeSingle();
+
+      if (error) {
+        res.status(500).json({ message: error.message });
+        return;
+      }
+
+      if (!data) {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+
+      res.status(200).json(data);
+    } catch (err) {
+      next(err);
     }
-
-    const result = await query<{ id: string }>(
-      `DELETE FROM invoices WHERE id = $1 AND firm_id = $2 RETURNING id`,
-      [req.params.id, req.user.firmId]
-    );
-
-    if (result.length === 0) {
-      res.status(404).json({ error: "Invoice not found" });
-      return;
-    }
-
-    res.json({ message: "Invoice deleted", id: result[0].id });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to delete invoice" });
   }
-});
+);
 
 export default router;

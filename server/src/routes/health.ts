@@ -1,16 +1,28 @@
 import { Router } from "express";
-import { pool } from "../config/database";
+import { getSupabaseClient } from "../config/supabaseClient";
 
 const router = Router();
 
 /**
- * GET /api/v1/health
- * Used by load balancers, monitoring, and the deploy pipeline.
- * Returns 200 if the server and DB are up, 503 if not.
+ * GET /health
+ * Verifies the API can reach Supabase (reads `firms`, limit 1).
  */
 router.get("/", async (_req, res) => {
   try {
-    await pool.query("SELECT 1");
+    const supabase = getSupabaseClient();
+    const { error } = await supabase.from("firms").select("id").limit(1);
+
+    if (error) {
+      res.status(503).json({
+        status: "error",
+        service: "buildright-api",
+        timestamp: new Date().toISOString(),
+        database: "unreachable",
+        message: error.message,
+      });
+      return;
+    }
+
     res.json({
       status: "ok",
       service: "buildright-api",
