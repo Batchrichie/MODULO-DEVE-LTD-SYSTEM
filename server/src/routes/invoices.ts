@@ -1,5 +1,5 @@
 import { Router, Response } from "express";
-import { authenticate, authorize, AuthenticatedRequest, UserRole } from "../middleware/auth";
+import { authenticate, authorize, AuthenticatedRequest } from "../middleware/auth";
 import { query } from "../config/database";
 import { computeInvoiceTax } from "../lib/taxComputation";
 

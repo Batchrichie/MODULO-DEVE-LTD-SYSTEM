@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
-import { pool, query } from "../config/database";
+import { query } from "../config/database";
 import jwt from "jsonwebtoken";
 
 const router = Router();
@@ -68,7 +68,7 @@ router.post("/login", async (req: Request, res: Response) => {
  * POST /api/v1/auth/logout
  * Invalidate the JWT (client-side handling)
  */
-router.post("/logout", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+router.post("/logout", authenticate, async (_req: AuthenticatedRequest, res: Response) => {
   try {
     // JWT is stateless, so logout is client-side (remove token from storage)
     res.json({ message: "Logged out successfully" });

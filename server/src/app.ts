@@ -20,7 +20,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Request logging
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   logger.info(`${req.method} ${req.path}`);
   next();
 });
@@ -31,25 +31,22 @@ app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/invoices", invoicesRouter);
 
 // Health check at root
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({ message: "BuildRight API - Under Construction" });
 });
 
 // 404 handler
-app.use((req, res) => {
+app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
 // Error handler
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error("Unhandled error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
 
 export default app;
-  const [invoices, setInvoices] = useState<Invoice[]>(seedInvoices);
-  const [showForm, setShowForm] = useState(false);
-  const [selectedInv, setSelectedInv] = useState<Invoice | null>(null);
   const [filterStatus, setFilterStatus] = useState<InvoiceStatus | "All">("All");
   const [searchQ, setSearchQ] = useState("");
 
